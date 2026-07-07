@@ -4,3 +4,5 @@ releases/
 *.js.map
 *.tsbuildinfo
 .DS_Store
+
+.memsearch/
