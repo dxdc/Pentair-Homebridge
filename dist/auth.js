@@ -147,9 +147,8 @@ class PentairAuth {
     // Private: full SRP auth flow
     // ---------------------------------------------------------------------------
     async fetchTokens() {
-        // Step 1: generate ephemeral key pair
-        const aBytes = Buffer.from(Array.from({ length: 32 }, () => Math.floor(Math.random() * 256)));
-        const a = BigInt('0x' + aBytes.toString('hex'));
+        // Step 1: generate ephemeral key pair (secret exponent must come from a CSPRNG)
+        const a = BigInt('0x' + (0, node_crypto_1.randomBytes)(32).toString('hex'));
         const A = modPow(g, a, N);
         const srpA = padHex(A);
         // Step 2: InitiateAuth → PASSWORD_VERIFIER challenge
@@ -170,8 +169,15 @@ class PentairAuth {
         const secretBlock = params['SECRET_BLOCK'];
         const userIdForSrp = params['USER_ID_FOR_SRP'] ?? this.username;
         // Step 3: compute SRP proof
+        // SRP-6a safety checks (RFC 5054 §2.6): abort if B % N == 0 or u == 0.
         const B = BigInt('0x' + srpB);
+        if (B % N === BigInt(0)) {
+            throw new Error('PentairAuth: invalid SRP_B from server');
+        }
         const u = BigInt('0x' + hexHash(padHex(A) + padHex(B)));
+        if (u === BigInt(0)) {
+            throw new Error('PentairAuth: invalid SRP scrambling parameter');
+        }
         const x = BigInt('0x' + hexHash(padHex(BigInt('0x' + saltHex)) + sha256hex(POOL_NAME + userIdForSrp + ':' + this.password)));
         const kGPowX = (k * modPow(g, x, N)) % N;
         const S = modPow(((B - kGPowX) % N + N) % N, a + u * x, N);
