@@ -65,9 +65,9 @@ class PentairApi {
         if (this.debugLogging) {
             this.log.info(`PentairApi: getDeviceStatus(${deviceId}) raw → ${JSON.stringify(raw)}`);
         }
+        // An empty payload means "no information", not "everything is off" - treat it as a failed poll.
         if (data.length === 0 || !data[0].fields) {
-            this.log.warn(`PentairApi: getDeviceStatus(${deviceId}) returned no data`);
-            return {};
+            throw new Error(`PentairApi: getDeviceStatus(${deviceId}) returned no data`);
         }
         const status = {};
         for (const [key, field] of Object.entries(data[0].fields)) {

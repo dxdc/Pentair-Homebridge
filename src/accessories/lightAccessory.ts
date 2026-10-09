@@ -29,6 +29,7 @@ import type {
 import type { PentairHomebridgePlatform } from '../platform';
 import type { PentairApi } from '../pentairApi';
 import { STATUS_POLL_INTERVAL_MS } from '../settings';
+import { STALE_AFTER_MS, communicationFailure } from './hapStatus';
 
 /** Configuration block expected under `config.light`. */
 export interface LightConfig {
@@ -109,6 +110,9 @@ export class PentairLightAccessory {
 
   private pollHandle: ReturnType<typeof setInterval> | null = null;
 
+  /** When the cached state was last confirmed by the cloud (starts as a grace period). */
+  private lastPollOk = Date.now();
+
   constructor(
     platform: PentairHomebridgePlatform,
     accessory: PlatformAccessory,
@@ -164,6 +168,7 @@ export class PentairLightAccessory {
   // ---------------------------------------------------------------------------
 
   private handleOnGet(): CharacteristicValue {
+    this.assertFresh();
     return this.state.on;
   }
 
@@ -172,46 +177,64 @@ export class PentairLightAccessory {
     this.platform.log.info(`Light [${this.deviceId}]: set on → ${on}`);
     try {
       await this.api.sendCommand(this.deviceId, { d13: on ? '1' : '0' });
+      this.state.on = on;
     } catch (err) {
       this.platform.log.error(`Light [${this.deviceId}]: on/off set failed`, err);
+      throw communicationFailure(this.platform.hapApi.hap);
     }
   }
 
   private handleHueGet(): CharacteristicValue {
+    this.assertFresh();
     return this.hue;
   }
 
-  /**
-   * Handles hue changes from HomeKit.  Defers sending until both hue and
-   * saturation are known.  Uses a short debounce so rapid slider moves
-   * don't flood the cloud API.
-   */
-  private hueSetDebounce: ReturnType<typeof setTimeout> | null = null;
-
-  private handleHueSet(value: CharacteristicValue): void {
+  private async handleHueSet(value: CharacteristicValue): Promise<void> {
     this.hue = value as number;
-
-    if (this.hueSetDebounce) clearTimeout(this.hueSetDebounce);
-    this.hueSetDebounce = setTimeout(() => {
-      this.applyColorChange().catch((err) => {
-        this.platform.log.error(`Light [${this.deviceId}]: hue set failed`, err);
-      });
-    }, 300);
+    await this.scheduleColorChange();
   }
 
   private handleSaturationGet(): CharacteristicValue {
+    this.assertFresh();
     return this.saturation;
   }
 
-  private handleSaturationSet(value: CharacteristicValue): void {
+  private async handleSaturationSet(value: CharacteristicValue): Promise<void> {
     this.saturation = value as number;
-    // Re-use the same debounce as hue so combined changes fire one command.
-    if (this.hueSetDebounce) clearTimeout(this.hueSetDebounce);
-    this.hueSetDebounce = setTimeout(() => {
-      this.applyColorChange().catch((err) => {
-        this.platform.log.error(`Light [${this.deviceId}]: saturation set failed`, err);
-      });
+    await this.scheduleColorChange();
+  }
+
+  /**
+   * Hue and saturation arrive as separate writes, often together, so they are
+   * debounced into one command. Every caller in the window waits on that one
+   * command, so a failure is reported back to HomeKit instead of only logged.
+   */
+  private colorDebounce: ReturnType<typeof setTimeout> | null = null;
+  private colorWaiters: Array<{ resolve: () => void; reject: (e: unknown) => void }> = [];
+
+  private scheduleColorChange(): Promise<void> {
+    if (this.colorDebounce) clearTimeout(this.colorDebounce);
+    const done = new Promise<void>((resolve, reject) => this.colorWaiters.push({ resolve, reject }));
+    this.colorDebounce = setTimeout(() => {
+      this.colorDebounce = null;
+      const waiters = this.colorWaiters;
+      this.colorWaiters = [];
+      this.applyColorChange().then(
+        () => waiters.forEach((w) => w.resolve()),
+        (err) => {
+          this.platform.log.error(`Light [${this.deviceId}]: color set failed`, err);
+          const hapErr = communicationFailure(this.platform.hapApi.hap);
+          waiters.forEach((w) => w.reject(hapErr));
+        },
+      );
     }, 300);
+    return done;
+  }
+
+  private assertFresh(): void {
+    if (Date.now() - this.lastPollOk > STALE_AFTER_MS) {
+      throw communicationFailure(this.platform.hapApi.hap);
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -255,8 +278,11 @@ export class PentairLightAccessory {
     try {
       const status = await this.api.getDeviceStatus(this.deviceId);
 
-      // d13: On/Off (0=OFF, 1=ON)
+      // d13: On/Off (0=OFF, 1=ON). A missing d13 is "unknown", not "off".
       const d13Raw = status['d13'];
+      if (d13Raw === undefined || d13Raw === null) {
+        throw new Error('status has no d13');
+      }
       const isOn = d13Raw === '1' || d13Raw === 1 || d13Raw === true;
 
       // d1: Light Mode/Color (1=SAM, 2=Party, ... 11=White, 12=Magenta)
@@ -282,6 +308,7 @@ export class PentairLightAccessory {
       this.service.updateCharacteristic(Char.On, isOn);
       this.service.updateCharacteristic(Char.Hue, newHue);
       this.service.updateCharacteristic(Char.Saturation, newSat);
+      this.lastPollOk = Date.now();
     } catch (err) {
       this.platform.log.warn(`Light [${this.deviceId}]: status poll failed`, err);
     }

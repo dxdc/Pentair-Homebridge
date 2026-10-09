@@ -39,6 +39,8 @@ export declare class PentairPumpAccessory {
     private state;
     /** Handle for the polling interval so it can be cleared on teardown. */
     private pollHandle;
+    /** When the cached state was last confirmed by the cloud (starts as a grace period). */
+    private lastPollOk;
     constructor(platform: PentairHomebridgePlatform, accessory: PlatformAccessory, api: PentairApi, config: PumpConfig);
     /** Returns whether the pump is currently active. */
     private handleActiveGet;
@@ -55,6 +57,7 @@ export declare class PentairPumpAccessory {
      * If the pump is off and a non-zero speed is requested, it is turned on.
      */
     private handleSpeedSet;
+    private assertFresh;
     /** Sends the start command to the cloud API (d25=1 = Enabled). */
     private startProgram;
     /** Sends the stop command to the cloud API (d25=0 = OFF). */

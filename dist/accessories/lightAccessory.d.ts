@@ -63,19 +63,24 @@ export declare class PentairLightAccessory {
     private hue;
     private saturation;
     private pollHandle;
+    /** When the cached state was last confirmed by the cloud (starts as a grace period). */
+    private lastPollOk;
     constructor(platform: PentairHomebridgePlatform, accessory: PlatformAccessory, api: PentairApi, config: LightConfig);
     private handleOnGet;
     private handleOnSet;
     private handleHueGet;
-    /**
-     * Handles hue changes from HomeKit.  Defers sending until both hue and
-     * saturation are known.  Uses a short debounce so rapid slider moves
-     * don't flood the cloud API.
-     */
-    private hueSetDebounce;
     private handleHueSet;
     private handleSaturationGet;
     private handleSaturationSet;
+    /**
+     * Hue and saturation arrive as separate writes, often together, so they are
+     * debounced into one command. Every caller in the window waits on that one
+     * command, so a failure is reported back to HomeKit instead of only logged.
+     */
+    private colorDebounce;
+    private colorWaiters;
+    private scheduleColorChange;
+    private assertFresh;
     /**
      * Derives the Pentair color index from the current hue/saturation and sends
      * the `lco` command to the cloud API.

@@ -19,6 +19,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.PentairPumpAccessory = void 0;
 const settings_1 = require("../settings");
+const hapStatus_1 = require("./hapStatus");
 /** Maximum number of named program slots used for the HomeKit set direction. */
 const PROGRAM_COUNT = 4;
 /** IF31 max rated flow in 1/10-GPM units (120 GPM × 10). */
@@ -74,6 +75,8 @@ class PentairPumpAccessory {
         };
         /** Handle for the polling interval so it can be cleared on teardown. */
         this.pollHandle = null;
+        /** When the cached state was last confirmed by the cloud (starts as a grace period). */
+        this.lastPollOk = Date.now();
         this.platform = platform;
         this.accessory = accessory;
         this.api = api;
@@ -112,6 +115,7 @@ class PentairPumpAccessory {
     // ---------------------------------------------------------------------------
     /** Returns whether the pump is currently active. */
     handleActiveGet() {
+        this.assertFresh();
         return this.state.active
             ? this.platform.hapApi.hap.Characteristic.Active.ACTIVE
             : this.platform.hapApi.hap.Characteristic.Active.INACTIVE;
@@ -141,10 +145,12 @@ class PentairPumpAccessory {
             this.platform.log.error(`Pump [${this.deviceId}]: active set failed`, err);
             this.state.active = prevActive;
             this.state.speedPct = prevSpeedPct;
+            throw (0, hapStatus_1.communicationFailure)(this.platform.hapApi.hap);
         }
     }
     /** Returns the last-polled rotation speed percentage. */
     handleSpeedGet() {
+        this.assertFresh();
         return this.state.speedPct;
     }
     /**
@@ -171,6 +177,12 @@ class PentairPumpAccessory {
             this.platform.log.error(`Pump [${this.deviceId}]: speed set failed`, err);
             this.state.program = prevProgram;
             this.state.active = prevActive;
+            throw (0, hapStatus_1.communicationFailure)(this.platform.hapApi.hap);
+        }
+    }
+    assertFresh() {
+        if (Date.now() - this.lastPollOk > hapStatus_1.STALE_AFTER_MS) {
+            throw (0, hapStatus_1.communicationFailure)(this.platform.hapApi.hap);
         }
     }
     // ---------------------------------------------------------------------------
@@ -201,8 +213,12 @@ class PentairPumpAccessory {
         try {
             const status = await this.api.getDeviceStatus(this.deviceId);
             // s14 = active program slot (0-indexed; 0 = off, ≥1 = running).
-            const s14 = parseInt(String(status['s14'] ?? '0'), 10);
-            const isActive = !isNaN(s14) && s14 > 0;
+            // A missing or unparseable s14 is "unknown", not "off".
+            const s14 = parseInt(String(status['s14']), 10);
+            if (isNaN(s14)) {
+                throw new Error(`status has no usable s14 (got ${JSON.stringify(status['s14'])})`);
+            }
+            const isActive = s14 > 0;
             // s15 = control mode, s16 = current setpoint — use these for display %.
             const mode = parseInt(String(status['s15'] ?? '0'), 10);
             const setpoint = parseInt(String(status['s16'] ?? '0'), 10);
@@ -215,6 +231,7 @@ class PentairPumpAccessory {
             const { Characteristic: Char } = this.platform.hapApi.hap;
             this.service.updateCharacteristic(Char.Active, isActive ? Char.Active.ACTIVE : Char.Active.INACTIVE);
             this.service.updateCharacteristic(Char.RotationSpeed, speedPct);
+            this.lastPollOk = Date.now();
         }
         catch (err) {
             this.platform.log.warn(`Pump [${this.deviceId}]: status poll failed`, err);
