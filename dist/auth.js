@@ -90,6 +90,7 @@ function jwtExpiry(token) {
 class PentairAuth {
     constructor(username, password) {
         this.session = null;
+        this.refreshInFlight = null;
         this.username = username;
         this.password = password;
         this.srpClient = new client_cognito_identity_provider_1.CognitoIdentityProviderClient({ region: settings_1.AWS_REGION });
@@ -106,7 +107,16 @@ class PentairAuth {
             credentialsExpiry,
         };
     }
+    /** Concurrent callers share one refresh instead of each starting their own. */
     async refreshIfNeeded() {
+        if (!this.refreshInFlight) {
+            this.refreshInFlight = this.doRefreshIfNeeded().finally(() => {
+                this.refreshInFlight = null;
+            });
+        }
+        return this.refreshInFlight;
+    }
+    async doRefreshIfNeeded() {
         const BUFFER_SECONDS = 300;
         const nowSeconds = Math.floor(Date.now() / 1000);
         if (!this.session) {

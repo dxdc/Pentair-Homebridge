@@ -133,6 +133,7 @@ export class PentairAuth {
   private readonly username: string;
   private readonly password: string;
   private session: AuthSession | null = null;
+  private refreshInFlight: Promise<void> | null = null;
 
   private readonly srpClient: CognitoIdentityProviderClient;
   private readonly identityClient: CognitoIdentityClient;
@@ -156,7 +157,17 @@ export class PentairAuth {
     };
   }
 
+  /** Concurrent callers share one refresh instead of each starting their own. */
   async refreshIfNeeded(): Promise<void> {
+    if (!this.refreshInFlight) {
+      this.refreshInFlight = this.doRefreshIfNeeded().finally(() => {
+        this.refreshInFlight = null;
+      });
+    }
+    return this.refreshInFlight;
+  }
+
+  private async doRefreshIfNeeded(): Promise<void> {
     const BUFFER_SECONDS = 300;
     const nowSeconds = Math.floor(Date.now() / 1000);
 
